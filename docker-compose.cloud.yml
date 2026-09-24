@@ -1,0 +1,101 @@
+# 闲鱼智控 —— 云服务器部署配置（拉取预构建镜像 + Nginx 反代）
+#
+# 与另外三份 compose 的分工：
+#   docker-compose.yml      本机/开发，本地 build 镜像
+#   docker-compose-cn.yml   同上，但 apt/pip/npm/Chromium 走国内源
+#   docker-compose.nas.yml  NAS 图形界面用，无 .env、无 Nginx
+#   本文件                  云服务器：不构建 + 只回环暴露应用端口 + Nginx 对外
+#
+# 为什么云上不要本地构建：Dockerfile 要在机器上跑 npm ci + vite build +
+# pip 编译 + 下载 Chromium，2~4 G 内存的云服务器会在这一步被打满甚至 OOM
+# （见 docs/deployment.md「部署失败排查」第 1、2 条）。预构建镜像压缩后 0.67 GB。
+#
+# 内存怎么填（应用容器上限，主机还要留 400~500 M 给系统和 dockerd）：
+#   2 GiB 主机：用默认 1536M，并按下方提示加 swap，否则滑块验证拉起 Chromium
+#              （冷启动峰值 300~500 M）时会被 OOM killer 杀掉，表现是反复重启
+#   4 GiB 主机：.env 里写 MEMORY_LIMIT=3072M
+#
+# 启动：
+#   cp .env.cloud.example .env   # 至少改掉 ADMIN_PASSWORD
+#   docker compose -f docker-compose.cloud.yml up -d
+#   docker compose -f docker-compose.cloud.yml ps   # 等到 healthy
+
+services:
+  xianyu-app:
+    image: ghcr.io/23star/xianyu-super-butler:latest
+    container_name: xianyu-super-butler
+    restart: unless-stopped
+    # 只绑回环：公网流量必须经下面的 Nginx，避免后台带着默认口令 admin/admin123
+    # 直接暴露在互联网上被扫。需要在公网直连 8080 调试时，删掉这里的 "127.0.0.1:"。
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data:rw
+      - ./logs:/app/logs:rw
+      - ./backups:/app/backups:rw
+      # 运行期没有任何代码路径回写它（app/config.py 的 Config.save() 零调用），
+      # 后台改的配置落在 SQLite 里，所以这里只读挂载是安全的。
+      - ./global_config.yml:/app/global_config.yml:ro
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      DB_PATH: "${DB_PATH:-/app/data/xianyu_data.db}"
+      # 仅首次建库时用来初始化管理员密码；库已存在时改这里无效，请在后台改。
+      # 依据 app/db_manager.py:1271。
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin123}"
+      SQL_LOG_ENABLED: "${SQL_LOG_ENABLED:-false}"
+      SQL_LOG_LEVEL: "${SQL_LOG_LEVEL:-WARNING}"
+      # 云服务器上 socket 取到的是 172.x 容器内网地址，日志里那句人工验证提示
+      # 会指向打不开的地址。填公网 IP 或域名（utils/item_search.py:88）。
+      SERVER_HOST: "${SERVER_HOST:-}"
+      # 后台「人工验证」按钮不受上面这项影响：它按 location.host 走同源
+      # （frontend/components/AccountList.tsx:254），经 Nginx 正常访问。
+      XVFB_SCREEN: "${XVFB_SCREEN:-1920x1080x24}"
+    networks:
+      - xianyu-network
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # Chromium 与 Playwright 首次解包较慢，60s 容易被判不健康。
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: "${MEMORY_LIMIT:-1536M}"
+          cpus: "${CPU_LIMIT:-2.0}"
+        reservations:
+          memory: "${MEMORY_RESERVATION:-512M}"
+          cpus: "${CPU_RESERVATION:-0.5}"
+    # 不限制的话 Docker 会把 stdout 无限写进 /var/lib/docker/containers/*.log，
+    # 与 ./logs 各算一份，是 40 G 磁盘最常见的隐性占用。
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  nginx:
+    image: nginx:alpine
+    container_name: xianyu-super-butler-nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.cloud.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      xianyu-app:
+        condition: service_healthy
+    networks:
+      - xianyu-network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+networks:
+  xianyu-network:
+    driver: bridge

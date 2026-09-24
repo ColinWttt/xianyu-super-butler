@@ -5,6 +5,7 @@ README 只保留最短路径，这里放完整细节。
 ## 目录
 
 - [滑块与人机验证](#滑块与人机验证)
+- [云服务器部署](#云服务器部署)
 - [部署失败排查](#部署失败排查)
 - [使用流程](#使用流程)
 - [更新](#更新)
@@ -54,6 +55,73 @@ docker compose logs xianyu-app | grep -E "Xvfb|Patchright"
 服务本身不受影响，但滑块通过率下降），请提供容器内 `/tmp/xvfb.log`。
 
 使用 VPN、代理或海外服务器时风控明显收紧，建议使用国内网络环境。
+
+## 云服务器部署
+
+`docker-compose.cloud.yml` 是云服务器专用配置：拉预构建镜像（压缩 0.67 GB，约 2 GB 磁盘）、
+应用端口只绑 `127.0.0.1`、由 Nginx 对外提供 80/443。
+
+### 机型
+
+| 项目 | 结论 |
+| --- | --- |
+| 内存 | **2 GiB 是及格线不是舒适线**。主机系统与 dockerd 占 400~500 M，Python 常驻 250~400 M，滑块验证拉起有头 Chromium + Xvfb 峰值 300~500 M，合计 1.2~1.7 G。建议 2 核 4 G |
+| CPU | 2 核够用，高于文档里点名的 J4125 / N5105 |
+| 磁盘 | 40 G 充裕：系统与 Docker 约 6 G、镜像含历史版本约 5 G、SQLite 与日志约 2 G。日志回收写在代码里（`XianyuAutoAsync.py:163` 保留 7 天，`app/file_log_collector.py:66` 10 M × 3 天）；本配置另加 `logging.max-size` 上限，避免容器 stdout 无限增长 |
+
+应用容器内存上限由 `.env` 的 `MEMORY_LIMIT` 控制：2 G 主机保持默认 `1536M`，4 G 主机改 `3072M`。
+
+### 步骤
+
+```bash
+# 1) 2 GiB 主机必做：加 swap 接住 Chromium 冷启动峰值，否则 OOM killer
+#    优先杀掉浏览器，配合 restart 策略表现为反复重启、CPU 持续打满
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swap.conf && sudo sysctl --system
+
+# 2) 拉代码、准备环境变量（务必先改 ADMIN_PASSWORD，后台用的是无盐 SHA-256 哈希）
+git clone https://github.com/23Star/xianyu-super-butler && cd xianyu-super-butler
+cp .env.cloud.example .env && mkdir -p data logs backups nginx/ssl
+vi .env    # ADMIN_PASSWORD、SERVER_HOST=公网IP或域名；4 G 机器再改 MEMORY_LIMIT
+
+# 3) 启动
+docker compose -f docker-compose.cloud.yml up -d
+docker compose -f docker-compose.cloud.yml ps      # 等到 xianyu-app 为 healthy
+docker compose -f docker-compose.cloud.yml logs --tail=50 xianyu-app   # 看 Xvfb 已就绪
+curl -fsS http://localhost/health                  # 经 Nginx 的健康检查
+```
+
+访问 `http://公网IP/`（无域名时只有 HTTP；上 HTTPS 见 `nginx/nginx.cloud.conf` 末尾注释）。
+在云服务器安全组里放通 80/443，**不要**放通 8080，应用端口只监听回环。
+
+更新：
+
+```bash
+docker compose -f docker-compose.cloud.yml pull
+docker compose -f docker-compose.cloud.yml up -d
+sudo docker image prune -f
+```
+
+### 环境变量里哪些是真生效的
+
+只有这些在 Python 侧有 `os.getenv` 读取：`DB_PATH`（`app/db_manager.py:30`）、
+`ADMIN_PASSWORD`（`app/db_manager.py:1271`，仅首次建库）、`SQL_LOG_ENABLED`、`SQL_LOG_LEVEL`、
+`SERVER_HOST` / `PUBLIC_IP`（`utils/item_search.py:88`）、`AI_MAX_TOKENS`。
+
+`docker-compose.yml` 里的 `AUTO_REPLY_ENABLED`、`AI_REPLY_ENABLED`、`SESSION_TIMEOUT`、
+`MULTIUSER_ENABLED`、`HEARTBEAT_*`、`WEBSOCKET_URL` 等**代码从不读取**，改它们没有效果——
+这些开关的真实来源是 `global_config.yml` 和后台界面写入的 SQLite。
+
+`global_config.yml` 以只读方式挂进容器是安全的：`app/config.py` 的 `Config.save()` 全仓零调用。
+
+### Nginx 必配的超时
+
+人工滑块验证走 `/api/captcha/ws/{id}`（`app/api_captcha_remote.py:35`），服务器持续推截图、
+浏览器回传鼠标事件。上游 `nginx/nginx.conf` 的 `proxy_read_timeout 30s` 会在拖动中途掐断连接，
+`nginx/nginx.cloud.conf` 对该路径放宽到 3600s 并关闭 `proxy_buffering`。
+`client_max_body_size` 也放宽到 30M，否则批量商品配图上传返回 413。
 
 ## 部署失败排查
 

@@ -375,6 +375,7 @@ check_disk_usage.py
 .env
 .env.*
 !.env.example
+!.env.cloud.example
 .env.docker
 
 # === 滑块验证模块配置（二进制分发）===
@@ -588,6 +589,7 @@ __cache__/
 .env
 .env.*
 !.env.example
+!.env.cloud.example
 *.local.yml
 *.dev.yml
 *.test.yml
@@ -726,6 +728,7 @@ utils/*.dist/**
 .env
 .env.*
 !.env.example
+!.env.cloud.example
 *.local.yml
 *.dev.yml
 *.test.yml
