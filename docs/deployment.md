@@ -63,6 +63,10 @@ docker compose logs xianyu-app | grep -E "Xvfb|Patchright"
 
 ### 机型
 
+**结论：买 2 核 4 G。** 2 核 2 G 经实测确实能跑通（下表），但它把这台机器的余量用光了：
+容器限到 1536 M 后剩给系统 + dockerd 只有约 500 M，一次滑块/人工验证就吃掉大半，
+再叠上商品同步或批量配图只能靠 swap 兜。4 G 的差价换来的是"验证时不用停别的任务"。
+
 | 项目 | 结论 |
 | --- | --- |
 | 内存 | **实测：一次滑块/人工验证会话让容器多占约 560 MiB 不可回收内存**。空载容器 `memory.current` 183 MiB（anon 173）；起一个 1280×800 的有头 Chromium 会话后稳定在 999 MiB（anon 551 + file 409，file 可回收），过程中峰值 1182 MiB。把容器硬限到 `1536M`（2 GiB 主机能给的全部）跑同样一轮：截图成功、`OOMKilled=false`。**所以 2 GiB 能跑，但没有余量**；4 GiB 才允许你在验证的同时跑商品同步/批量配图。旧文档抄来的"Chromium 峰值 300~500 M"偏低，以本表为准 |
@@ -107,6 +111,13 @@ ssh root@<服务器IP> 'mkdir -p ~/xianyu-super-butler'
 git archive --format=tar HEAD | ssh root@<服务器IP> 'tar -x -C ~/xianyu-super-butler'
 ```
 
+代码已推到 GitHub 时，服务器上直接 clone 自己的仓库更省事（省掉每次改动重传）：
+
+```bash
+git clone https://github.com/<你的用户名>/<仓库名>.git ~/xianyu-super-butler
+# 以后更新：cd ~/xianyu-super-butler && git pull && docker compose -f docker-compose.cloud.yml up -d --force-recreate
+```
+
 服务器上随后：
 
 ```bash
@@ -130,6 +141,17 @@ docker compose -f docker-compose.cloud.yml run --rm --entrypoint sh xianyu-app \
 ### 步骤
 
 ```bash
+# 0) 装 Docker（Ubuntu 22.04 / Debian 12，用阿里云镜像源）
+curl -fsSL https://get.docker.com | sh - --mirror Aliyun
+sudo systemctl enable --now docker
+docker compose version            # 必须是 v2；v1 的 docker-compose 命令本配置用不了
+# 拉 nginx:alpine 这类 Docker Hub 镜像在国内很慢，去 cr.console.aliyun.com 拿自己的
+# 加速器地址配上：
+sudo mkdir -p /etc/docker && sudo tee /etc/docker/daemon.json >/dev/null <<'JSON'
+{ "registry-mirrors": ["https://<你的专属ID>.mirror.aliyuncs.com"] }
+JSON
+sudo systemctl restart docker
+
 # 1) 2 GiB 主机必做：加 swap 接住 Chromium 冷启动峰值，否则 OOM killer
 #    优先杀掉浏览器，配合 restart 策略表现为反复重启、CPU 持续打满
 sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
