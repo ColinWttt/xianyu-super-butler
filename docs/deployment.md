@@ -67,9 +67,19 @@ docker compose logs xianyu-app | grep -E "Xvfb|Patchright"
 | --- | --- |
 | 内存 | **2 GiB 是及格线不是舒适线**。主机系统与 dockerd 占 400~500 M，Python 常驻 250~400 M，滑块验证拉起有头 Chromium + Xvfb 峰值 300~500 M，合计 1.2~1.7 G。建议 2 核 4 G |
 | CPU | 2 核够用，高于文档里点名的 J4125 / N5105 |
-| 磁盘 | 40 G 充裕：系统与 Docker 约 6 G、镜像含历史版本约 5 G、SQLite 与日志约 2 G。日志回收写在代码里（`XianyuAutoAsync.py:163` 保留 7 天，`app/file_log_collector.py:66` 10 M × 3 天）；本配置另加 `logging.max-size` 上限，避免容器 stdout 无限增长 |
+| 磁盘 | 40 G 充裕：系统与 Docker 约 6 G、镜像解压实测 **2.84 G**（`docker system df`，压缩传输 0.67 G）留两份用于升级、SQLite 与日志约 2 G。日志回收写在代码里（`XianyuAutoAsync.py:163` 保留 7 天，`app/file_log_collector.py:66` 10 M × 3 天）；本配置另加 `logging.max-size` 上限，避免容器 stdout 无限增长 |
 
 应用容器内存上限由 `.env` 的 `MEMORY_LIMIT` 控制：2 G 主机保持默认 `1536M`，4 G 主机改 `3072M`。
+
+### 先确认镜像能起来
+
+`ghcr.io/23star/xianyu-super-butler` 由 `.github/workflows/docker-publish.yml` 在 push `main` 时构建。
+2026-09-25 实测早于提交 `67a7962` 的 `latest`：镜像内缺 `app/delivery_template.py`、
+`app/services/notification_test.py`、`app/routers/logistics_quote.py`、`app/routers/logistics_agent.py`，
+而 `app/reply_server.py` 顶层无条件导入 → `uvicorn服务器启动失败: No module named 'app.delivery_template'`，
+健康检查恒失败、Nginx 因 `depends_on: service_healthy` 不启动。**换服务器前先确认 Actions 已用最新
+`main` 跑过一次**（`docker compose ... pull` 后看 `docker logs` 里有没有 `Uvicorn running`）。
+来不及等构建就解开 `docker-compose.cloud.yml` 里注释掉的三段挂载，把补齐的文件盖进镜像。
 
 ### 步骤
 
@@ -129,6 +139,18 @@ sudo docker image prune -f
 浏览器回传鼠标事件。上游 `nginx/nginx.conf` 的 `proxy_read_timeout 30s` 会在拖动中途掐断连接，
 `nginx/nginx.cloud.conf` 对该路径放宽到 3600s 并关闭 `proxy_buffering`。
 `client_max_body_size` 也放宽到 30M，否则批量商品配图上传返回 413。
+
+### 本机实测记录（2026-09-25，Docker Desktop）
+
+用独立的空 `data/` 起过一遍，不接真实账号：
+
+- `nginx -t` 通过；`/health` 经 Nginx 返回 200，首页返回 1487 字节 SPA
+- `/api/captcha/ws/...` 经 Nginx 握手返回 `101 Switching Protocols`，30s 超时问题不复现
+- 挂载的 `global_config.yml` 写着 `127.0.0.1:8088` 时，`API_HOST`/`API_PORT` 仍把后端钉在
+  `http://0.0.0.0:8080`（日志 `Uvicorn running on http://0.0.0.0:8080`）
+- `[entrypoint] Xvfb 已就绪 DISPLAY=:99`，物流路由按预期只降级不崩：
+  `⚠️ 物流报价与物流 Agent 路由未注册，接口将返回 404`
+- 空库自动建表并生成首份备份，`data/xianyu_data.db` 446 KB
 
 ## 部署失败排查
 

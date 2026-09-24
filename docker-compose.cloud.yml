@@ -22,6 +22,11 @@
 
 services:
   xianyu-app:
+    # 这个镜像由本仓库 .github/workflows/docker-publish.yml 在 push main 时构建。
+    # 2026-09-25 实测：早于提交 67a7962 的 latest 里缺 app/delivery_template.py、
+    # app/services/notification_test.py 与 app/routers/logistics_*.py，
+    # uvicorn 在 import 阶段就失败，容器永远 unhealthy。所以换服务器前先确认
+    # Actions 已经跑过一次 main，否则解开下面三段挂载兜底。
     image: ghcr.io/23star/xianyu-super-butler:latest
     container_name: xianyu-super-butler
     restart: unless-stopped
@@ -36,6 +41,11 @@ services:
       # 运行期没有任何代码路径回写它（app/config.py 的 Config.save() 零调用），
       # 后台改的配置落在 SQLite 里，所以这里只读挂载是安全的。
       - ./global_config.yml:/app/global_config.yml:ro
+      # 兜底：镜像残缺时把本地补齐的三个文件盖进去，无需自己构建镜像。
+      # 代价是服务器上的 checkout 必须与镜像同版本，升级镜像时要一起核对。
+      # - ./app/delivery_template.py:/app/app/delivery_template.py:ro
+      # - ./app/services/notification_test.py:/app/app/services/notification_test.py:ro
+      # - ./app/reply_server.py:/app/app/reply_server.py:ro
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       DB_PATH: "${DB_PATH:-/app/data/xianyu_data.db}"
