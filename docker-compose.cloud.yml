@@ -27,7 +27,8 @@ services:
     # app/delivery_template.py、app/services/notification_test.py 与
     # app/routers/logistics_*.py，uvicorn 在 import 阶段就失败，容器永远 unhealthy、
     # Nginx 因 depends_on healthy 不启动 —— 靠下面三段挂载把本地补齐的文件覆盖进去。
-    image: ghcr.io/23star/xianyu-super-butler:latest
+    # ghcr 在国内云主机上可能拉不动，用 APP_IMAGE 换成转推后的地址，不必改本文件。
+    image: ${APP_IMAGE:-ghcr.io/23star/xianyu-super-butler:latest}
     container_name: xianyu-super-butler
     restart: unless-stopped
     # 只绑回环：公网流量必须经下面的 Nginx，避免后台带着默认口令 admin/admin123

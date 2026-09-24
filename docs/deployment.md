@@ -159,6 +159,32 @@ docker compose -f docker-compose.cloud.yml up -d --force-recreate
 sudo docker image prune -f
 ```
 
+### 国内云主机的镜像可达性
+
+应用镜像在 `ghcr.io`，而 GitHub 容器仓库对大陆线路的可达性不稳定：国内云主机上
+`docker pull` 可能超时或极慢，这时起不来跟机器配置无关，纯粹是拉不到镜像。先在服务器上单试这一条：
+
+```bash
+docker pull ghcr.io/23star/xianyu-super-butler:latest
+```
+
+拉不动就按代价二选一：
+
+```bash
+# A. 本机已有镜像，管道直传（解压 2.84 G，gzip 后约 0.9 G）
+docker save ghcr.io/23star/xianyu-super-butler:latest | gzip \
+  | ssh root@<服务器IP> 'gunzip | docker load'
+
+# B. 转推到阿里云容器镜像服务个人版（免费），服务器改从 registry.cn-<区域>.aliyuncs.com 拉
+docker tag ghcr.io/23star/xianyu-super-butler:latest \
+  registry.cn-hangzhou.aliyuncs.com/<命名空间>/xianyu-butler:latest
+docker login registry.cn-hangzhou.aliyuncs.com
+docker push registry.cn-hangzhou.aliyuncs.com/<命名空间>/xianyu-butler:latest
+# 然后把 docker-compose.cloud.yml 里的 image: 换成该地址，或改用 APP_IMAGE 环境变量
+```
+
+无论走哪条，镜像里仍缺那 4 个模块（见「镜像与补齐文件」），三段覆盖挂载照旧保留。
+
 ### 环境变量里哪些是真生效的
 
 只有这些在 Python 侧有 `os.getenv` 读取：`DB_PATH`（`app/db_manager.py:30`）、
