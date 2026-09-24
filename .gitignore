@@ -92,6 +92,8 @@ global_config.local.yml
 # 测试文件
 test_*.py
 *_test.py
+# 源码模块，名字恰好命中上一条规则
+!app/services/notification_test.py
 keywords_sample.xlsx
 
 # 备份文件

@@ -36,8 +36,6 @@ from app.services.notification_test import (
     notification_test_rate_limiter,
 )
 from app.routers.delivery_block import create_delivery_block_router
-from app.routers.logistics_quote import create_logistics_quote_router
-from app.routers.logistics_agent import create_logistics_agent_router
 from utils.qr_login import qr_login_manager
 from utils.xianyu_utils import trans_cookies
 from utils.image_utils import image_manager
@@ -48,6 +46,18 @@ from utils.order_status_rules import (
 )
 
 from loguru import logger
+
+# 物流报价与物流 Agent 路由：公开发布版本缺少 app/routers/logistics_*.py，
+# 缺文件时只降级这两个页面，不能让整个后台起不来。
+try:
+    from app.routers.logistics_quote import create_logistics_quote_router
+    from app.routers.logistics_agent import create_logistics_agent_router
+
+    LOGISTICS_ROUTERS_AVAILABLE = True
+    logistics_router_error = None
+except ImportError as logistics_import_error:
+    LOGISTICS_ROUTERS_AVAILABLE = False
+    logistics_router_error = str(logistics_import_error)
 
 product_automation = ProductAutomationService(db_manager)
 notification_sender = NotificationSender()
@@ -357,11 +367,14 @@ else:
 app.include_router(create_delivery_block_router(get_current_user, db_manager))
 logger.info("已注册发货拦截规则路由")
 
-app.include_router(create_logistics_quote_router(get_current_user, db_manager))
-logger.info("已注册物流报价解析路由")
+if LOGISTICS_ROUTERS_AVAILABLE:
+    app.include_router(create_logistics_quote_router(get_current_user, db_manager))
+    logger.info("已注册物流报价解析路由")
 
-app.include_router(create_logistics_agent_router(get_current_user, db_manager))
-logger.info("已注册物流 Agent 路由")
+    app.include_router(create_logistics_agent_router(get_current_user, db_manager))
+    logger.info("已注册物流 Agent 路由")
+else:
+    logger.warning(f"⚠️ 物流报价与物流 Agent 路由未注册，接口将返回 404: {logistics_router_error}")
 
 # 初始化文件日志收集器
 setup_file_logging()
