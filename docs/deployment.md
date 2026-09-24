@@ -153,6 +153,8 @@ docker compose -f docker-compose.cloud.yml run --rm --entrypoint sh xianyu-app \
 
 ```bash
 # 0) 装 Docker（Ubuntu 22.04 / Debian 12，用阿里云镜像源）
+#    系统镜像就选 Ubuntu 22.04 LTS：默认统一 cgroup v2，本文的内存自查命令才认路径。
+#    别选 CentOS 7.9（2024-06-30 停止维护、公共源已迁 vault，且是 kernel 3.10 + cgroup v1）。
 curl -fsSL https://get.docker.com | sh - --mirror Aliyun
 sudo systemctl enable --now docker
 docker compose version            # 必须是 v2；v1 的 docker-compose 命令本配置用不了
@@ -275,12 +277,18 @@ sudo dmesg -T | grep -iE "out of memory|oom-kill" | tail -5
 # 3) 当前用量与主机余量：avail 长期低于 200M 就该降账号数或加内存
 docker stats --no-stream xianyu-super-butler && free -h
 
-# 4) 容器自己的历史峰值（cgroup v2），比瞬时值更能暴露验证那一刻冲高多少
-docker exec xianyu-super-butler cat /sys/fs/cgroup/memory.peak 2>/dev/null | awk '{printf "峰值 %.0f MiB\n",$1/1048576}'
+# 4) 峰值不能只看瞬时值，用 cron 每分钟采样（跨内核版本都准）
+sudo tee /etc/cron.d/xianyu-mem >/dev/null <<'CRON'
+* * * * * root /usr/bin/docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' xianyu-super-butler >> /var/log/xianyu-mem.log 2>&1
+CRON
+# 做一轮滑块/人工验证后再看，找出的才是真实峰值
+sort -t'/' -k2 -n /var/log/xianyu-mem.log | tail -3
 ```
 
-第 4 条若读不到 `memory.peak`（老内核），改看 `docker stats` 在**做滑块/人工验证那一刻**的采样，
-那才是峰值现场。连续几天 `OOMKilled=false` 且第 2 条无输出，就可以认为这台机器够用。
+不要用 `/sys/fs/cgroup/memory.peak` 读历史峰值：那个文件要**内核 5.19+**，
+Ubuntu 22.04（默认 5.15）和 Alibaba Cloud Linux 3（5.10）都没有，cgroup v1 的机器上路径更是完全不同。
+上面第 4 条的定时采样才是跨版本通用的做法。连续几天 `OOMKilled=false` 且第 2 条无输出，
+就可以认为这台机器够用。
 
 ## 部署失败排查
 
