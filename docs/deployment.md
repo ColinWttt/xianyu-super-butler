@@ -138,6 +138,17 @@ docker compose -f docker-compose.cloud.yml run --rm --entrypoint sh xianyu-app \
 `.github/workflows/docker-publish.yml` 会在你的账号里构建出含补齐文件的
 `ghcr.io/<你的用户名>/xianyu-super-butler:latest`，服务器改成 `git clone` 你自己的 fork 即可。
 
+多账号会不会把内存翻倍？**不会翻倍浏览器那部分**。`utils/browser_limit.py:73` 按配置算并发闸：
+`cpu_count <= 2 或 内存 <= 4.5G` 时**同时只允许 1 个 Chromium**，第二个账号的验证会排队而不是挤进来。
+所以 2 核机器上挂 2 个账号，峰值仍是「1 份应用 + 1 份浏览器」；想手动改就设 `MAX_CONCURRENT_BROWSERS`。
+注意这个闸取的是 `psutil` 看到的**主机总内存**，容器 `mem_limit` 不影响它。
+
+账号自身的增量很小：一条 wss 长连接加几个 asyncio 任务，按订单维度缓存的那些 dict
+（通知、发货、确认）在 `XianyuAutoAsync.py:575-606` 里按 30 分钟 TTL 定时清；
+`_item_detail_cache` 有 1000 条上限 + 24 小时 TTL（`XianyuAutoAsync.py:194`）。
+只有 `delivery_sent_orders` 这类防重复发货的 set 是只增不清（`XianyuAutoAsync.py:1246`），
+量级是每条订单 ID 约 100 字节，一天几十单跑一年也就 MB 级，重启即清零，不构成 OOM 风险。
+
 ### 步骤
 
 ```bash
@@ -251,6 +262,25 @@ docker push registry.cn-hangzhou.aliyuncs.com/<命名空间>/xianyu-butler:lates
 - `[entrypoint] Xvfb 已就绪 DISPLAY=:99`，物流路由按预期只降级不崩：
   `⚠️ 物流报价与物流 Agent 路由未注册，接口将返回 404`
 - 空库自动建表并生成首份备份，`data/xianyu_data.db` 446 KB
+
+### 跑满几天到底稳不稳，用这四条判断
+
+```bash
+# 1) 有没有被 OOM 杀过（false 才是真的好；被杀过 Status 会带 Killed）
+docker inspect -f '{{.Name}} OOMKilled={{.State.OOMKilled}} Restarting={{.Restarting}}' xianyu-super-butler
+
+# 2) 内核视角的杀进程记录
+sudo dmesg -T | grep -iE "out of memory|oom-kill" | tail -5
+
+# 3) 当前用量与主机余量：avail 长期低于 200M 就该降账号数或加内存
+docker stats --no-stream xianyu-super-butler && free -h
+
+# 4) 容器自己的历史峰值（cgroup v2），比瞬时值更能暴露验证那一刻冲高多少
+docker exec xianyu-super-butler cat /sys/fs/cgroup/memory.peak 2>/dev/null | awk '{printf "峰值 %.0f MiB\n",$1/1048576}'
+```
+
+第 4 条若读不到 `memory.peak`（老内核），改看 `docker stats` 在**做滑块/人工验证那一刻**的采样，
+那才是峰值现场。连续几天 `OOMKilled=false` 且第 2 条无输出，就可以认为这台机器够用。
 
 ## 部署失败排查
 
