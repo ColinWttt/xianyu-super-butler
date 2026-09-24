@@ -65,11 +65,18 @@ docker compose logs xianyu-app | grep -E "Xvfb|Patchright"
 
 | 项目 | 结论 |
 | --- | --- |
-| 内存 | **2 GiB 是及格线不是舒适线**。主机系统与 dockerd 占 400~500 M，Python 常驻 250~400 M，滑块验证拉起有头 Chromium + Xvfb 峰值 300~500 M，合计 1.2~1.7 G。建议 2 核 4 G |
+| 内存 | **实测：一次滑块/人工验证会话让容器多占约 560 MiB 不可回收内存**。空载容器 `memory.current` 183 MiB（anon 173）；起一个 1280×800 的有头 Chromium 会话后稳定在 999 MiB（anon 551 + file 409，file 可回收），过程中峰值 1182 MiB。把容器硬限到 `1536M`（2 GiB 主机能给的全部）跑同样一轮：截图成功、`OOMKilled=false`。**所以 2 GiB 能跑，但没有余量**；4 GiB 才允许你在验证的同时跑商品同步/批量配图。旧文档抄来的"Chromium 峰值 300~500 M"偏低，以本表为准 |
 | CPU | 2 核够用，高于文档里点名的 J4125 / N5105 |
 | 磁盘 | 40 G 充裕：系统与 Docker 约 6 G、镜像解压实测 **2.84 G**（`docker system df`，压缩传输 0.67 G）留两份用于升级、SQLite 与日志约 2 G。日志回收写在代码里（`XianyuAutoAsync.py:163` 保留 7 天，`app/file_log_collector.py:66` 10 M × 3 天）；本配置另加 `logging.max-size` 上限，避免容器 stdout 无限增长 |
 
-应用容器内存上限由 `.env` 的 `MEMORY_LIMIT` 控制：2 G 主机保持默认 `1536M`，4 G 主机改 `3072M`。
+测量方法与边界：`docker compose` 起 `ghcr.io/23star/xianyu-super-butler:latest`（带三段补齐挂载），
+容器内读 `/sys/fs/cgroup/memory.current` 与 `memory.stat`，用与应用完全相同的 Chromium 参数
+（`utils/manual_captcha.py:188` 那组 `--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
+--disable-blink-features=AutomationControlled`，`channel='chromium'`，有头 + Xvfb）打开一个页面并截图。
+**测的是普通网页，不是真实闲鱼滑块页**——后者的图片与 JS 更多，把上面的数当下限看。
+
+内存上限由 `.env` 的 `MEMORY_LIMIT` 控制：2 G 主机 `1536M`（配合 swap，见下）、
+4 G 主机 `3072M`。2 G 主机上不要再放别的服务，也别同时开多个账号的商品同步。
 
 ### 镜像与补齐文件
 

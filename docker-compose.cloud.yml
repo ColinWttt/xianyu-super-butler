@@ -11,9 +11,11 @@
 # （见 docs/deployment.md「部署失败排查」第 1、2 条）。预构建镜像压缩后 0.67 GB。
 #
 # 内存怎么填（应用容器上限，主机还要留 400~500 M 给系统和 dockerd）：
-#   2 GiB 主机：用默认 1536M，并按下方提示加 swap，否则滑块验证拉起 Chromium
-#              （冷启动峰值 300~500 M）时会被 OOM killer 杀掉，表现是反复重启
-#   4 GiB 主机：.env 里写 MEMORY_LIMIT=3072M
+#   实测：空载容器 183 M；起一次有头 Chromium 验证会话后稳定 999 M（其中 409 M 是可
+#   回收 page cache，真正不可回收约 551 M），过程峰值 1182 M；硬限 1536 M 跑通、无 OOM。
+#   2 GiB 主机：MEMORY_LIMIT=1536M + 必须加 swap，且这台机器不要再放别的服务
+#   4 GiB 主机：MEMORY_LIMIT=3072M，才有余量在验证的同时跑商品同步/批量配图
+#   测的是普通网页，真实闲鱼滑块页更重 —— 上面的数按下限看
 #
 # 启动：
 #   cp .env.cloud.example .env   # 至少改掉 ADMIN_PASSWORD
