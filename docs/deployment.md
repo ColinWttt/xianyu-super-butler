@@ -91,6 +91,22 @@ docker compose logs xianyu-app | grep -E "Xvfb|Patchright"
 留出的那部分不是浪费：验证会话的 page cache 要靠它周转。另外 2 G 主机上不要放别的服务，
 也别同时开多个账号的商品同步。
 
+也可以直接用阿里云官方的 **SWAP 配置扩展**（`ACS-Extension-swap_config`，控制台「扩展程序」里点装），
+它按实例规格自动决定 swap 大小，与上面等价。装完务必验收这三条，因为插件内部设了什么看不到：
+
+```bash
+cat /proc/swaps        # 有 swapfile，Size 列单位是 KB
+sysctl vm.swappiness   # 是 0 就等于劝退 swap，必须改；是 60 又太积极
+grep swap /etc/fstab   # 重启后是否还在
+```
+
+`vm.swappiness` 统一改成 10：0 会让 swap 形同虚设，60 会提前把 Chromium 的匿名页换出，
+滑块轨迹采样掉帧（表现为日志里 `丢弃 N/M 个采样点, 最大滞后 XXXms`）。
+
+顺带一个实测结论：Docker 默认给容器的额度是「`--memory` + 等量 swap」（`--memory 100m` 时
+容器内 `memory.max=100MiB`、`memory.swap.max=100MiB`），所以 **swap 只要存在，容器就会自动用上**，
+不需要在 compose 里另设 `memswap` 或 `mem_swappiness`。
+
 ### 镜像与补齐文件
 
 `ghcr.io/23star/xianyu-super-butler` 由仓库作者那条 `main` 的 `.github/workflows/docker-publish.yml`
