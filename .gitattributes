@@ -36,3 +36,6 @@ entrypoint.sh text eol=lf
 # 文件照常参与版本管理和 CI。
 tests/** linguist-vendored
 static/assets/** linguist-vendored
+
+# Auto detect text files and perform LF normalization
+* text=auto
