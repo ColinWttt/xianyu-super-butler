@@ -152,9 +152,12 @@ docker compose -f docker-compose.cloud.yml run --rm --entrypoint sh xianyu-app \
 ### 步骤
 
 ```bash
-# 0) 装 Docker（Ubuntu 22.04 / Debian 12，用阿里云镜像源）
-#    系统镜像就选 Ubuntu 22.04 LTS：默认统一 cgroup v2，本文的内存自查命令才认路径。
-#    别选 CentOS 7.9（2024-06-30 停止维护、公共源已迁 vault，且是 kernel 3.10 + cgroup v1）。
+# 0) 装 Docker（Ubuntu 24.04 / Debian 13，用阿里云镜像源）
+#    系统镜像首选 Ubuntu 24.04 LTS（内核 6.8，cgroup v2，连 memory.peak 都可读），
+#    次选 Debian 13.6。别选 Ubuntu 18.04/20.04（标准支持已结束且默认 cgroup v1，
+#    本文的 /sys/fs/cgroup/memory.* 命令路径不成立）、别选 CentOS 7.9（2024-06-30 EOL、
+#    kernel 3.10 + cgroup v1），也别用宝塔/WordPress/LNMP 应用镜像（会抢 80 端口、白吃内存）。
+#    换系统后先自检层级：stat -fc %T /sys/fs/cgroup/  期望 cgroup2fs
 curl -fsSL https://get.docker.com | sh - --mirror Aliyun
 sudo systemctl enable --now docker
 docker compose version            # 必须是 v2；v1 的 docker-compose 命令本配置用不了
@@ -277,17 +280,17 @@ sudo dmesg -T | grep -iE "out of memory|oom-kill" | tail -5
 # 3) 当前用量与主机余量：avail 长期低于 200M 就该降账号数或加内存
 docker stats --no-stream xianyu-super-butler && free -h
 
-# 4) 峰值不能只看瞬时值，用 cron 每分钟采样（跨内核版本都准）
+# 4) 峰值不能只看瞬时值：每分钟采一次容器 cgroup 真实用量（需 cgroup v2，即本文要求的系统）
 sudo tee /etc/cron.d/xianyu-mem >/dev/null <<'CRON'
-* * * * * root /usr/bin/docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' xianyu-super-butler >> /var/log/xianyu-mem.log 2>&1
+* * * * * root printf '%s %s\n' "$(date +\%F_\%T)" "$(( $(docker exec xianyu-super-butler cat /sys/fs/cgroup/memory.current 2>/dev/null || echo 0) / 1048576 ))MiB" >> /var/log/xianyu-mem.log
 CRON
-# 做一轮滑块/人工验证后再看，找出的才是真实峰值
-sort -t'/' -k2 -n /var/log/xianyu-mem.log | tail -3
+# 做一轮滑块/人工验证后取最大值，才是真实峰值；0 MiB 表示容器没起或路径不对
+sort -k2 -n -r /var/log/xianyu-mem.log | head -3
 ```
 
-不要用 `/sys/fs/cgroup/memory.peak` 读历史峰值：那个文件要**内核 5.19+**，
-Ubuntu 22.04（默认 5.15）和 Alibaba Cloud Linux 3（5.10）都没有，cgroup v1 的机器上路径更是完全不同。
-上面第 4 条的定时采样才是跨版本通用的做法。连续几天 `OOMKilled=false` 且第 2 条无输出，
+`/sys/fs/cgroup/memory.peak` 要**内核 5.19+**才有：Ubuntu 24.04、Debian 13 能读到，
+Ubuntu 22.04（默认 5.15）和 Alibaba Cloud Linux 3（5.10）没有，cgroup v1 的机器上路径更是完全不同。
+为了不看机器型号，本文统一用上面第 4 条的定时采样。连续几天 `OOMKilled=false` 且第 2 条无输出，
 就可以认为这台机器够用。
 
 ## 部署失败排查
