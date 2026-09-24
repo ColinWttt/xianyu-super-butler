@@ -79,8 +79,17 @@ docker compose logs xianyu-app | grep -E "Xvfb|Patchright"
 --disable-blink-features=AutomationControlled`，`channel='chromium'`，有头 + Xvfb）打开一个页面并截图。
 **测的是普通网页，不是真实闲鱼滑块页**——后者的图片与 JS 更多，把上面的数当下限看。
 
-内存上限由 `.env` 的 `MEMORY_LIMIT` 控制：2 G 主机 `1536M`（配合 swap，见下）、
-4 G 主机 `3072M`。2 G 主机上不要再放别的服务，也别同时开多个账号的商品同步。
+内存上限由 `.env` 的 `MEMORY_LIMIT` 控制，**按实机 `free -h` 的 total 算，别按商品页标的内存档算**：
+云厂商的 4 G 实例通常只报出 **3.5 GiB**（内核与驱动预留），给它 3072M 就等于占满物理内存。
+2026-09-25 一台阿里云 4 G 实例实测：`Mem: 3.5Gi total / 490Mi used`，`Swap: 0B`，`nproc 2`。
+
+| 实机 total | MEMORY_LIMIT | swap |
+| --- | --- | --- |
+| 约 1.9 GiB（标称 2 G） | `1536M` | 必加 2 G |
+| 约 3.5 GiB（标称 4 G） | `2816M`（留 768 MiB 给系统与 dockerd） | 必加 2 G |
+
+留出的那部分不是浪费：验证会话的 page cache 要靠它周转。另外 2 G 主机上不要放别的服务，
+也别同时开多个账号的商品同步。
 
 ### 镜像与补齐文件
 
@@ -123,7 +132,7 @@ git clone https://github.com/<你的用户名>/<仓库名>.git ~/xianyu-super-bu
 ```bash
 cd ~/xianyu-super-butler
 cp .env.cloud.example .env && mkdir -p data logs backups nginx/ssl
-vi .env        # 改 ADMIN_PASSWORD、SERVER_HOST；4 G 机器改 MEMORY_LIMIT=3072M
+vi .env        # 改 ADMIN_PASSWORD、SERVER_HOST；MEMORY_LIMIT 按 free -h 的 total 定（3.5 GiB → 2816M）
 ```
 
 日后上游作者补齐了那 4 个文件，镜像就是自足的，可以删掉三段挂载。判断依据：
@@ -168,7 +177,8 @@ sudo mkdir -p /etc/docker && sudo tee /etc/docker/daemon.json >/dev/null <<'JSON
 JSON
 sudo systemctl restart docker
 
-# 1) 2 GiB 主机必做：加 swap 接住 Chromium 冷启动峰值，否则 OOM killer
+# 1) 必做（不是只有 2 G 才要）：阿里云 Ubuntu 镜像默认不给 swap，实测 free -h 显示 Swap 0B。
+#    没有 swap，Chromium 冷启动冲高时 OOM killer 直接杀浏览器
 #    优先杀掉浏览器，配合 restart 策略表现为反复重启、CPU 持续打满
 sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
 sudo mkswap /swapfile && sudo swapon /swapfile
