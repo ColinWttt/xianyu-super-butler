@@ -71,15 +71,39 @@ docker compose logs xianyu-app | grep -E "Xvfb|Patchright"
 
 应用容器内存上限由 `.env` 的 `MEMORY_LIMIT` 控制：2 G 主机保持默认 `1536M`，4 G 主机改 `3072M`。
 
-### 先确认镜像能起来
+### 镜像与补齐文件
 
 `ghcr.io/23star/xianyu-super-butler` 由 `.github/workflows/docker-publish.yml` 在 push `main` 时构建。
 2026-09-25 实测早于提交 `67a7962` 的 `latest`：镜像内缺 `app/delivery_template.py`、
 `app/services/notification_test.py`、`app/routers/logistics_quote.py`、`app/routers/logistics_agent.py`，
 而 `app/reply_server.py` 顶层无条件导入 → `uvicorn服务器启动失败: No module named 'app.delivery_template'`，
-健康检查恒失败、Nginx 因 `depends_on: service_healthy` 不启动。**换服务器前先确认 Actions 已用最新
-`main` 跑过一次**（`docker compose ... pull` 后看 `docker logs` 里有没有 `Uvicorn running`）。
-来不及等构建就解开 `docker-compose.cloud.yml` 里注释掉的三段挂载，把补齐的文件盖进镜像。
+健康检查恒失败、Nginx 因 `depends_on: service_healthy` 不启动。**这与服务器配置无关，任何机器光 pull 都起不来。**
+
+`docker-compose.cloud.yml` 默认把补齐的三个文件覆盖挂载进镜像，所以**服务器上必须有这份 checkout**：
+
+```bash
+# 核对镜像与本地 checkout 同版：只差 13 行，即物流路由 try/except 那处补丁
+docker exec xianyu-super-butler wc -l /app/app/reply_server.py
+wc -l app/reply_server.py
+```
+
+用 `git clone` 部署天然满足。服务器上不放 git 仓库时，手工同步这三个文件
+（缺文件时 Docker 会在容器内建同名空目录，报错从 `ModuleNotFound` 变成更难读的 `IsADirectoryError`）：
+
+```bash
+scp app/delivery_template.py root@<服务器IP>:~/xianyu-super-butler/app/
+scp app/services/notification_test.py root@<服务器IP>:~/xianyu-super-butler/app/services/
+scp app/reply_server.py root@<服务器IP>:~/xianyu-super-butler/app/
+```
+
+等 push `main` 让 Actions 重建出完整镜像后，pull 下来的镜像就是自足的，那三段挂载可以删掉。
+判断镜像是否已修好：
+
+```bash
+docker compose -f docker-compose.cloud.yml pull
+docker compose -f docker-compose.cloud.yml run --rm --entrypoint sh xianyu-app \
+  -c 'ls /app/app/delivery_template.py /app/app/services/notification_test.py'
+```
 
 ### 步骤
 
