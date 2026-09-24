@@ -73,11 +73,12 @@ docker compose logs xianyu-app | grep -E "Xvfb|Patchright"
 
 ### 镜像与补齐文件
 
-`ghcr.io/23star/xianyu-super-butler` 由 `.github/workflows/docker-publish.yml` 在 push `main` 时构建。
-2026-09-25 实测早于提交 `67a7962` 的 `latest`：镜像内缺 `app/delivery_template.py`、
+`ghcr.io/23star/xianyu-super-butler` 由仓库作者那条 `main` 的 `.github/workflows/docker-publish.yml`
+构建。2026-09-25 实测 `latest`：镜像内缺 `app/delivery_template.py`、
 `app/services/notification_test.py`、`app/routers/logistics_quote.py`、`app/routers/logistics_agent.py`，
 而 `app/reply_server.py` 顶层无条件导入 → `uvicorn服务器启动失败: No module named 'app.delivery_template'`，
 健康检查恒失败、Nginx 因 `depends_on: service_healthy` 不启动。**这与服务器配置无关，任何机器光 pull 都起不来。**
+本地补齐不会让上游镜像变完整，所以云上必须靠下面的覆盖挂载把补齐的文件带进去。
 
 `docker-compose.cloud.yml` 默认把补齐的三个文件覆盖挂载进镜像，所以**服务器上必须有这份 checkout**：
 
@@ -87,23 +88,37 @@ docker exec xianyu-super-butler wc -l /app/app/reply_server.py
 wc -l app/reply_server.py
 ```
 
-用 `git clone` 部署天然满足。服务器上不放 git 仓库时，手工同步这三个文件
-（缺文件时 Docker 会在容器内建同名空目录，报错从 `ModuleNotFound` 变成更难读的 `IsADirectoryError`）：
+补齐的提交只在你本地，服务器上 `git clone` 上游拿不到，所以把已提交的文件送过去。
+Windows 的 Git Bash 没有 `rsync`，用 `git archive` 走 ssh 管道最省事——它只送跟踪文件，
+`data/`、`logs/`、`browser_data/`、以及本机 `global_config.yml` 那处端口调试天然不会过去
+（缺挂载源文件时 Docker 会在容器内建同名空目录，报错从 `ModuleNotFound` 变成更难读的
+`IsADirectoryError`）：
 
 ```bash
-scp app/delivery_template.py root@<服务器IP>:~/xianyu-super-butler/app/
-scp app/services/notification_test.py root@<服务器IP>:~/xianyu-super-butler/app/services/
-scp app/reply_server.py root@<服务器IP>:~/xianyu-super-butler/app/
+# 本机 Git Bash 里执行
+ssh root@<服务器IP> 'mkdir -p ~/xianyu-super-butler'
+git archive --format=tar HEAD | ssh root@<服务器IP> 'tar -x -C ~/xianyu-super-butler'
 ```
 
-等 push `main` 让 Actions 重建出完整镜像后，pull 下来的镜像就是自足的，那三段挂载可以删掉。
-判断镜像是否已修好：
+服务器上随后：
+
+```bash
+cd ~/xianyu-super-butler
+cp .env.cloud.example .env && mkdir -p data logs backups nginx/ssl
+vi .env        # 改 ADMIN_PASSWORD、SERVER_HOST；4 G 机器改 MEMORY_LIMIT=3072M
+```
+
+日后上游作者补齐了那 4 个文件，镜像就是自足的，可以删掉三段挂载。判断依据：
 
 ```bash
 docker compose -f docker-compose.cloud.yml pull
 docker compose -f docker-compose.cloud.yml run --rm --entrypoint sh xianyu-app \
   -c 'ls /app/app/delivery_template.py /app/app/services/notification_test.py'
 ```
+
+想彻底摆脱挂载和手工传文件，就把这个仓库 fork 到**你自己的** GitHub 账号下再推上去：
+`.github/workflows/docker-publish.yml` 会在你的账号里构建出含补齐文件的
+`ghcr.io/<你的用户名>/xianyu-super-butler:latest`，服务器改成 `git clone` 你自己的 fork 即可。
 
 ### 步骤
 
@@ -115,8 +130,9 @@ sudo mkswap /swapfile && sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-swap.conf && sudo sysctl --system
 
-# 2) 拉代码、准备环境变量（务必先改 ADMIN_PASSWORD，后台用的是无盐 SHA-256 哈希）
-git clone https://github.com/23Star/xianyu-super-butler && cd xianyu-super-butler
+# 2) 代码用上面「镜像与补齐文件」里的 git archive 管道送过来（clone 上游拿不到补齐的模块），
+#    然后准备环境变量（务必先改 ADMIN_PASSWORD，后台用的是无盐 SHA-256 哈希）
+cd ~/xianyu-super-butler
 cp .env.cloud.example .env && mkdir -p data logs backups nginx/ssl
 vi .env    # ADMIN_PASSWORD、SERVER_HOST=公网IP或域名；4 G 机器再改 MEMORY_LIMIT
 
@@ -130,11 +146,16 @@ curl -fsS http://localhost/health                  # 经 Nginx 的健康检查
 访问 `http://公网IP/`（无域名时只有 HTTP；上 HTTPS 见 `nginx/nginx.cloud.conf` 末尾注释）。
 在云服务器安全组里放通 80/443，**不要**放通 8080，应用端口只监听回环。
 
-更新：
+更新（本机改完代码提交后重跑那条 `git archive` 管道即可；单文件 bind mount 锁的是 inode，
+覆盖后必须重建容器才看得到新代码，`docker compose restart` 无效）：
 
 ```bash
-docker compose -f docker-compose.cloud.yml pull
-docker compose -f docker-compose.cloud.yml up -d
+# 本机
+git archive --format=tar HEAD | ssh root@<服务器IP> 'tar -x -C ~/xianyu-super-butler'
+# 服务器
+cd ~/xianyu-super-butler
+docker compose -f docker-compose.cloud.yml pull          # 想要升级镜像时
+docker compose -f docker-compose.cloud.yml up -d --force-recreate
 sudo docker image prune -f
 ```
 

@@ -22,12 +22,11 @@
 
 services:
   xianyu-app:
-    # 这个镜像由本仓库 .github/workflows/docker-publish.yml 在 push main 时构建。
-    # 2026-09-25 实测：早于提交 67a7962 的 latest 里缺 app/delivery_template.py、
-    # app/services/notification_test.py 与 app/routers/logistics_*.py，uvicorn 在
-    # import 阶段就失败，容器永远 unhealthy、Nginx 因 depends_on healthy 不启动。
-    # 在 Actions 用最新 main 重建镜像之前，靠下面三段挂载把补齐的文件覆盖进去；
-    # 镜像重建后那三行可以删掉。
+    # 这个镜像由上游作者那条 main 的 docker-publish.yml 构建；origin 是别人的仓库、不往里推，
+    # 所以它不会因为你本地补齐而变完整。2026-09-25 实测 latest 里缺
+    # app/delivery_template.py、app/services/notification_test.py 与
+    # app/routers/logistics_*.py，uvicorn 在 import 阶段就失败，容器永远 unhealthy、
+    # Nginx 因 depends_on healthy 不启动 —— 靠下面三段挂载把本地补齐的文件覆盖进去。
     image: ghcr.io/23star/xianyu-super-butler:latest
     container_name: xianyu-super-butler
     restart: unless-stopped
@@ -42,11 +41,13 @@ services:
       # 运行期没有任何代码路径回写它（app/config.py 的 Config.save() 零调用），
       # 后台改的配置落在 SQLite 里，所以这里只读挂载是安全的。
       - ./global_config.yml:/app/global_config.yml:ro
-      # 镜像里缺这三个文件，用本地这份覆盖（镜像重建后可删）。
-      # 前提：服务器上的 checkout 与镜像是同一条 main 线，否则被覆盖的
-      # reply_server.py 会和其他模块错版。核对办法：
-      #   docker exec xianyu-super-butler wc -l /app/app/reply_server.py
-      # 与本地相比只差 13 行（就是本文件 try/except 降级那处补丁）即为同版。
+      # 镜像里缺这三个文件，用本地这份覆盖。服务器上这三个路径必须真实存在
+      # （补齐的提交只在本机，origin 是上游作者的仓库、不往里推，用 git archive 送过去；
+      # 缺文件时 Docker 会建一个同名空目录，报错变成难读的 IsADirectoryError）。
+      # 单文件 bind mount 锁的是 inode：覆盖后必须 up -d --force-recreate，
+      # 只 restart 容器仍看着旧文件。
+      # 版本核对：docker exec xianyu-super-butler wc -l /app/app/reply_server.py
+      # 与本地只差 13 行（就是这份 try/except 降级补丁）即为同一条 main 线。
       - ./app/delivery_template.py:/app/app/delivery_template.py:ro
       - ./app/services/notification_test.py:/app/app/services/notification_test.py:ro
       - ./app/reply_server.py:/app/app/reply_server.py:ro
