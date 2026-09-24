@@ -16,6 +16,10 @@ entrypoint.sh text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
 
+# 环境变量模板在 Linux 上被 docker compose 读取，CRLF 会把行尾的 \r
+# 当成值的一部分（ADMIN_PASSWORD 末尾多个 \r，表现为后台登不进去）。
+.env* text eol=lf
+
 # Binary assets are not normalized.
 *.png binary
 *.jpg binary

@@ -108,11 +108,18 @@ sudo docker image prune -f
 
 只有这些在 Python 侧有 `os.getenv` 读取：`DB_PATH`（`app/db_manager.py:30`）、
 `ADMIN_PASSWORD`（`app/db_manager.py:1271`，仅首次建库）、`SQL_LOG_ENABLED`、`SQL_LOG_LEVEL`、
-`SERVER_HOST` / `PUBLIC_IP`（`utils/item_search.py:88`）、`AI_MAX_TOKENS`。
+`SERVER_HOST` / `PUBLIC_IP`（`utils/item_search.py:88`）、`API_HOST` / `API_PORT`
+（`Start.py:690`）、`AI_MAX_TOKENS`。
 
 `docker-compose.yml` 里的 `AUTO_REPLY_ENABLED`、`AI_REPLY_ENABLED`、`SESSION_TIMEOUT`、
 `MULTIUSER_ENABLED`、`HEARTBEAT_*`、`WEBSOCKET_URL` 等**代码从不读取**，改它们没有效果——
 这些开关的真实来源是 `global_config.yml` 和后台界面写入的 SQLite。
+
+注意 `AUTO_REPLY.api.host` 与 `.port` **就是后端进程的监听地址**（`Start.py:694` 传给
+`uvicorn.Config`），与 `api.enabled` 那个「走外部接口回复」的开关无关。仓库里这份
+`global_config.yml` 会随容器挂载进去，所以本机调试时把它改成 `127.0.0.1:8088` 一旦提交，
+服务器上容器内健康检查打 `localhost:8080` 会一直失败，Nginx 因 `depends_on: service_healthy`
+永不启动。`docker-compose.cloud.yml` 用 `API_HOST` / `API_PORT` 把它钉在 `0.0.0.0:8080`。
 
 `global_config.yml` 以只读方式挂进容器是安全的：`app/config.py` 的 `Config.save()` 全仓零调用。
 

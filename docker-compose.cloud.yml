@@ -39,6 +39,12 @@ services:
     environment:
       TZ: "${TZ:-Asia/Shanghai}"
       DB_PATH: "${DB_PATH:-/app/data/xianyu_data.db}"
+      # 后端的监听地址与端口取自 global_config.yml 的 AUTO_REPLY.api.host/port
+      # （Start.py:694），环境变量优先级更高。这里显式钉死，是因为挂载进去的
+      # global_config.yml 只要写着 127.0.0.1 或非 8080 端口，容器里的健康检查
+      # 就会一直失败、Nginx 因 depends_on healthy 而永不启动。
+      API_HOST: "0.0.0.0"
+      API_PORT: "8080"
       # 仅首次建库时用来初始化管理员密码；库已存在时改这里无效，请在后台改。
       # 依据 app/db_manager.py:1271。
       ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin123}"
