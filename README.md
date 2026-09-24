@@ -184,6 +184,7 @@ git pull && docker compose up -d --build
 
 > **滑块与人机验证、部署失败排查、使用流程** 见 [docs/deployment.md](docs/deployment.md)。
 > 自动过滑块受平台风控限制不保证成功，自动失败时可在账号页转人工验证。
+> 本仓库是上游的修改版，改动清单与许可证义务见 [FORK.md](FORK.md)。
 
 ## 交流与反馈
 
