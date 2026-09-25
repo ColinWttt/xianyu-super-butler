@@ -364,6 +364,23 @@ curl http://localhost:8080/health
 
 仅显示「在线」但没有「监听中」时，请先查看「通知与日志」中的启动错误。
 
+### 断线期间的订单不会自动补发
+
+自动发货**只有一个触发源**：`_handle_auto_delivery` 的三处调用全在 WebSocket 消息循环内
+（`XianyuAutoAsync.py:10171 / 10227 / 10301`），`order_sync_enabled` 那条只是把订单拉进列表。
+平台也不会在重连后补推错过的消息。所以**容器重启、Token 失效、风控冷却期间产生的订单，永远不会被
+自动发货命中**，表现为库里 `orders` 有记录、`system_shipped=0`。
+
+注意 `system_shipped=0` 只代表"系统没发"，人工在闲鱼里发过也是 0，别拿它当漏发证据。
+每次重启或长时间掉线之后，按这个自查一遍并手动补发：
+
+```bash
+docker exec xianyu-super-butler python -c "
+import sqlite3
+c=sqlite3.connect('file:/app/data/xianyu_data.db?mode=ro',uri=True)
+print(c.execute('select order_id,item_id,order_status,created_at from orders where system_shipped=0 order by created_at desc limit 10').fetchall())"
+```
+
 ### 发货规则优先级
 
 1. `指定账号 + 指定商品`：按商品 ID 精确发货，优先级最高，关键词可留空。
