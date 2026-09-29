@@ -21,6 +21,7 @@ from typing import Optional, List, Dict, Any, Callable
 from loguru import logger
 
 from utils import browser_limit
+from utils.user_agents import CHROME_UA
 
 # 滑块优先用 Patchright —— Playwright 的反检测分支，修掉了 CDP 层面的自动化痕迹。
 # 实测同一份 Chromium：Playwright 下 navigator.webdriver 为 true（最基础也最致命的
@@ -3005,7 +3006,7 @@ class XianyuSliderStealth:
                 headless=not show_browser,
                 args=browser_args,
                 viewport={'width': 1980, 'height': 1024},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+                user_agent=CHROME_UA,
                 locale='zh-CN',  # 设置浏览器区域为中文
                 accept_downloads=True,
                 ignore_https_errors=True,
@@ -4263,7 +4264,11 @@ class XianyuSliderStealth:
 
         用 user_data_dir 精确匹配，避免误杀用户自己开的浏览器或其他账号的实例。
         """
-        marker = f"browser_data{os.sep}slider_{self.pure_user_id}"
+        # 命令行里的 user-data-dir 可能用 / 或 \（Windows Chrome 两种都接受），
+        # 不能依赖 os.sep；词边界避免 slider_123 误杀 slider_1234 的目录。
+        marker_pattern = re.compile(
+            rf"browser_data[/\\]slider_{re.escape(self.pure_user_id)}(?!\w)"
+        )
         killed = 0
 
         try:
@@ -4275,7 +4280,7 @@ class XianyuSliderStealth:
             for proc in psutil.process_iter(['pid', 'cmdline']):
                 try:
                     cmdline = ' '.join(proc.info.get('cmdline') or [])
-                    if marker in cmdline:
+                    if marker_pattern.search(cmdline):
                         proc.kill()
                         killed += 1
                 except (psutil.NoSuchProcess, psutil.AccessDenied, Exception):

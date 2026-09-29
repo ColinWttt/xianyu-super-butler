@@ -26,6 +26,7 @@ from collections import defaultdict
 from app.db_manager import db_manager
 from app.specification import combine_legacy_specification
 from utils.log_sanitizer import redact_log_record, redact_sensitive_text
+from utils.user_agents import CHROME_UA, SEC_CH_UA
 
 # 滑块验证补丁已废弃，使用集成的 Playwright 登录方法
 # 不再需要猴子补丁，所有功能已集成到 XianyuSliderStealth 类中
@@ -1019,10 +1020,7 @@ class XianyuLive:
             'content-type': 'application/x-www-form-urlencoded',
             'origin': 'https://www.goofish.com',
             'referer': 'https://www.goofish.com/',
-            'user-agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36'
-            ),
+            'user-agent': CHROME_UA,
             'cookie': self.cookies_str.replace('\n', '').replace('\r', ''),
         }
 
@@ -1103,10 +1101,7 @@ class XianyuLive:
             'content-type': 'application/x-www-form-urlencoded',
             'origin': 'https://seller.goofish.com',
             'referer': 'https://seller.goofish.com/',
-            'user-agent': (
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                'AppleWebKit/537.36 Chrome/138.0.0.0 Safari/537.36'
-            ),
+            'user-agent': CHROME_UA,
             'cookie': self.cookies_str.replace('\n', '').replace('\r', ''),
         }
 
@@ -1590,6 +1585,8 @@ class XianyuLive:
             receiver_name = None
             receiver_phone = None
             receiver_address = None
+            real_buyer_id = None
+            real_item_title = None
             real_values = self._pending_order_real_values.pop(order_id, None)
             if real_values:
                 amount = real_values.get("amount") or None
@@ -1601,15 +1598,22 @@ class XianyuLive:
                 receiver_name = real_values.get("receiver_name") or None
                 receiver_phone = real_values.get("receiver_phone") or None
                 receiver_address = real_values.get("receiver_address") or None
+                real_buyer_id = real_values.get("buyer_id") or None
+                real_item_title = real_values.get("item_title") or None
 
             existing_order = db_manager.get_order_by_id(order_id)
             snapshot_item_id = item_id
-            snapshot_buyer_id = buyer_id
+            snapshot_buyer_id = real_buyer_id or buyer_id
             snapshot_quantity = str(buy_num) if buy_num else None
             snapshot_created_at = created_at
             if existing_order:
                 snapshot_item_id = item_id if not existing_order.get("item_id") else None
-                snapshot_buyer_id = buyer_id if not existing_order.get("buyer_id") else None
+                existing_buyer_id = (existing_order.get("buyer_id") or "").strip()
+                if real_buyer_id and (not existing_buyer_id or existing_buyer_id == "unknown_user"):
+                    # 卖家端真实数据可纠正快照兜底写入的 unknown_user
+                    snapshot_buyer_id = real_buyer_id
+                elif existing_buyer_id:
+                    snapshot_buyer_id = None
                 snapshot_created_at = created_at if not existing_order.get("created_at") else None
 
             saved = db_manager.insert_or_update_order(
@@ -1632,6 +1636,12 @@ class XianyuLive:
                 receiver_address=receiver_address,
             )
             if saved:
+                # 商品标题只从卖家端来，交易卡片里没有；回填 item_info 供订单列表展示
+                if item_id and real_item_title:
+                    try:
+                        db_manager.upsert_item_title(self.cookie_id, item_id, real_item_title)
+                    except Exception as title_err:
+                        logger.debug(f"【{self.cookie_id}】回填商品标题失败 {item_id}: {self._safe_str(title_err)}")
                 source = "卖家端接口" if real_values else "交易卡片"
                 logger.info(
                     f"【{self.cookie_id}】已保存订单快照（金额来源: {source}）: "
@@ -2184,13 +2194,13 @@ class XianyuLive:
                 'content-type': 'application/x-www-form-urlencoded',
                 'pragma': 'no-cache',
                 'priority': 'u=1, i',
-                'sec-ch-ua': '"Not;A=Brand";v="99", "Google Chrome";v="139", "Chromium";v="139"',
+                'sec-ch-ua': SEC_CH_UA,
                 'sec-ch-ua-mobile': '?0',
                 'sec-ch-ua-platform': '"Windows"',
                 'sec-fetch-dest': 'empty',
                 'sec-fetch-mode': 'cors',
                 'sec-fetch-site': 'same-site',
-                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+                'user-agent': CHROME_UA,
                 'referer': 'https://www.goofish.com/',
                 'origin': 'https://www.goofish.com',
                 'cookie': self.cookies_str
@@ -3800,11 +3810,7 @@ class XianyuLive:
             browser = await browser_limit.launch_browser(playwright, launch_options, "账号资料抓取")
             context = await browser.new_context(
                 viewport={'width': 1440, 'height': 900},
-                user_agent=(
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/138.0.0.0 Safari/537.36'
-                ),
+                user_agent=CHROME_UA,
             )
 
             browser_cookies = []
@@ -3954,7 +3960,7 @@ class XianyuLive:
             # 创建浏览器上下文
             context = await browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+                user_agent=CHROME_UA
             )
 
             # 设置Cookie
@@ -4639,7 +4645,7 @@ class XianyuLive:
             
             # 不接受AVIF格式（PIL默认不支持），让CDN返回WEBP/JPEG等格式
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': CHROME_UA,
                 'Accept': 'image/jpeg,image/png,image/gif,image/webp,*/*;q=0.8',
                 'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
                 'Referer': 'https://www.goofish.com/',
@@ -8089,7 +8095,7 @@ class XianyuLive:
 
             # 创建浏览器上下文
             context_options = {
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+                'user_agent': CHROME_UA
             }
 
             # 使用标准窗口大小
@@ -8425,7 +8431,7 @@ class XianyuLive:
 
             # 创建浏览器上下文
             context_options = {
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+                'user_agent': CHROME_UA
             }
 
             # 使用标准窗口大小
@@ -8732,7 +8738,7 @@ class XianyuLive:
 
             # 创建浏览器上下文
             context_options = {
-                'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+                'user_agent': CHROME_UA
             }
 
             # 使用标准窗口大小
@@ -9052,7 +9058,7 @@ class XianyuLive:
             "Connection": "Upgrade",
             "Pragma": "no-cache",
             "Cache-Control": "no-cache",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            "User-Agent": CHROME_UA,
             "Origin": "https://www.goofish.com",
             "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": "zh-CN,zh;q=0.9",

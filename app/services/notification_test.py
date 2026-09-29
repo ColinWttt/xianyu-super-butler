@@ -1,174 +1,209 @@
-"""Rate-limited real test sends for account notification rules.
+"""账号通知规则的测试发送服务。
 
-``NotificationSender`` knows how to talk to one channel; it does not know which
-rule belongs to which user.  This service resolves the rule through
-``db_manager.get_notification_test_target`` (which validates ownership) and
-keeps the outbound call rate limited, because every test sends a real message
-to a third-party service.
+向一条规则绑定的渠道发送真实测试消息，用于排查通知链路连通性。
+刻意不做"发送前必须启用"的校验：停用的规则/渠道也要能测，
+否则用户改完配置只能先启用才能验证，反而更容易漏报。
 """
 
 from __future__ import annotations
 
-import math
+import secrets
 import time
-import uuid
 from collections import defaultdict, deque
-from datetime import datetime
-from threading import Lock
-from typing import Any
+from typing import Any, Callable, Dict, Optional
 
-from loguru import logger
+from app.services.notification_channels import NotificationChannelConfigError
+from app.services.notification_sender import (
+    NotificationNetworkError,
+    NotificationProviderRejected,
+    NotificationSendTimeout,
+)
 
-from .notification_channels import NotificationChannelConfigError
-from .notification_sender import NotificationSendError, NotificationSender
 
-
-class NotificationTestError(RuntimeError):
-    """A safe, user-facing test-send failure."""
+class NotificationTestError(Exception):
+    """测试发送失败，code 对前端稳定，status_code 对 HTTP 状态。"""
 
     def __init__(
         self,
+        code: str,
         message: str,
-        *,
-        code: str = "notification_send_failed",
-        status_code: int = 400,
-        retry_after: int | None = None,
+        status_code: int = 502,
+        retry_after: Optional[int] = None,
     ) -> None:
         super().__init__(message)
-        self.public_message = message
         self.code = code
+        self.message = message
         self.status_code = status_code
         self.retry_after = retry_after
 
-    def detail(self) -> dict[str, Any]:
-        detail: dict[str, Any] = {"code": self.code, "message": self.public_message}
-        if self.retry_after:
-            detail["retry_after"] = self.retry_after
-        return detail
+    def detail(self) -> Dict[str, Any]:
+        return {"code": self.code, "message": self.message}
 
 
 class NotificationTestRateLimiter:
-    """Fixed-window limiter keyed per user and rule."""
+    """按 (rule_id, user_id) 维度的滑动窗口限流，防止测试端点被刷。"""
 
-    def __init__(self, *, window_seconds: float = 60.0, max_attempts: int = 5) -> None:
-        self.window_seconds = window_seconds
-        self.max_attempts = max_attempts
-        self._hits: dict[str, deque[float]] = defaultdict(deque)
-        self._lock = Lock()
+    def __init__(self, limit: int = 10, window_seconds: int = 60) -> None:
+        self.limit = max(1, int(limit))
+        self.window_seconds = max(1, int(window_seconds))
+        self._hits: Dict[tuple, deque] = defaultdict(deque)
 
-    def acquire(self, key: str) -> float:
-        """Return 0 when the attempt is allowed, else seconds until a slot frees."""
+    def acquire(self, key: tuple) -> Optional[int]:
+        """尝试占用一个名额；被限流时返回建议的重试等待秒数。"""
         now = time.monotonic()
-        with self._lock:
-            hits = self._hits[key]
-            while hits and now - hits[0] >= self.window_seconds:
-                hits.popleft()
-            if len(hits) >= self.max_attempts:
-                return self.window_seconds - (now - hits[0])
-            hits.append(now)
-            return 0.0
+        hits = self._hits[key]
+        while hits and now - hits[0] >= self.window_seconds:
+            hits.popleft()
+        if len(hits) >= self.limit:
+            return self.window_seconds
+        hits.append(now)
+        return None
 
 
-notification_test_rate_limiter = NotificationTestRateLimiter()
+def build_test_message(cookie_id: str) -> str:
+    """构造测试消息模板，{request_id} 由服务层填充以便追踪。"""
+    return (
+        "【闲鱼超级管家】通知测试\n"
+        f"账号：{cookie_id}\n"
+        "追踪 ID：{request_id}\n"
+        "收到本消息说明该渠道通知链路畅通。"
+    )
+
+
+# 进程级共享限流器：测试端点对所有用户共用同一配额池
+notification_test_rate_limiter = NotificationTestRateLimiter(limit=10, window_seconds=60)
 
 
 class NotificationTestService:
-    """Send one real notification through the channel bound to a rule."""
+    """发送通知测试消息并输出脱敏审计日志。"""
 
     def __init__(
         self,
-        db_manager: Any,
-        *,
-        sender: NotificationSender | None = None,
-        limiter: NotificationTestRateLimiter | None = None,
+        db: Any,
+        sender: Any = None,
+        limiter: Optional[NotificationTestRateLimiter] = None,
+        log_fn: Optional[Callable[..., None]] = None,
     ) -> None:
-        self.db_manager = db_manager
-        self.sender = sender or NotificationSender()
+        self.db = db
+        self.sender = sender
         self.limiter = limiter
+
+        if log_fn is not None:
+            self._log = log_fn
+        else:
+            from loguru import logger
+
+            self._log = lambda level, message, user: getattr(logger, level)(message)
+
+    def _log_safe(self, level: str, message: str, operator: Optional[dict]) -> None:
+        """审计日志只输出结构性字段，绝不携带渠道配置（内含 webhook token 等敏感值）。"""
+        try:
+            self._log(level, message, operator)
+        except TypeError:
+            # loguru 风格的 log_fn 只接受 (level, message)
+            self._log(level, message)
 
     async def send_rule_test(
         self,
         rule_id: int,
         user_id: int,
-        user_info: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        self._check_rate_limit(rule_id, user_id)
-
-        # 该查询同时校验规则、渠道和闲鱼账号归属，且刻意不按启用状态过滤，
-        # 这样停用的规则也能用来排查渠道连通性。
-        target = self.db_manager.get_notification_test_target(rule_id, user_id)
+        operator: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        target = self.db.get_notification_test_target(rule_id, user_id)
         if not target:
             raise NotificationTestError(
-                "通知规则不存在或不属于当前用户",
-                code="notification_rule_not_found",
+                "notification_rule_not_found",
+                "通知规则不存在或无权限",
                 status_code=404,
             )
 
-        request_id = uuid.uuid4().hex
-        started = time.monotonic()
+        if self.limiter is not None:
+            retry_after = self.limiter.acquire((int(rule_id), int(user_id)))
+            if retry_after is not None:
+                raise NotificationTestError(
+                    "notification_rate_limited",
+                    "测试发送过于频繁，请稍后再试",
+                    status_code=429,
+                    retry_after=retry_after,
+                )
+
+        request_id = secrets.token_hex(6)
+        message = build_test_message(target["cookie_id"]).format(request_id=request_id)
+
+        self._log_safe(
+            "info",
+            f"source=notification_test rule_id={rule_id} request_id={request_id} result=started",
+            operator,
+        )
+
         try:
+            if self.sender is None:
+                raise NotificationTestError(
+                    "notification_send_failed",
+                    "通知发送器未初始化",
+                    status_code=503,
+                )
             receipt = await self.sender.send(
                 target["channel_type"],
                 target["channel_config"],
-                self._message(target, request_id),
-                request_id=request_id,
+                message,
             )
-        except NotificationChannelConfigError as exc:
-            self._log("config_invalid", rule_id, user_info, target)
+            if not receipt:
+                raise NotificationTestError(
+                    "notification_send_failed",
+                    "通知测试发送失败，请稍后重试",
+                    status_code=502,
+                )
+        except NotificationChannelConfigError:
             raise NotificationTestError(
-                str(exc),
-                code=exc.code,
-                status_code=422,
-            ) from exc
-        except NotificationSendError as exc:
-            self._log("send_failed", rule_id, user_info, target)
+                "notification_config_invalid",
+                "通知渠道配置不完整，请先补全再测试",
+                status_code=400,
+            )
+        except NotificationSendTimeout:
             raise NotificationTestError(
-                exc.public_message,
-                code=exc.code,
+                "notification_send_timeout",
+                "通知渠道响应超时，请检查网络或稍后重试",
+                status_code=504,
+            )
+        except NotificationProviderRejected as exc:
+            status = getattr(exc, "status_code", None) or 502
+            raise NotificationTestError(
+                "notification_provider_rejected",
+                "通知渠道拒绝了本次请求",
+                status_code=status,
+            )
+        except NotificationNetworkError:
+            raise NotificationTestError(
+                "notification_send_failed",
+                "通知渠道网络异常，请稍后重试",
                 status_code=502,
-            ) from exc
+            )
+        except NotificationTestError:
+            raise
+        except Exception:
+            # 未知异常的消息可能包含敏感值，不回显给前端，只给稳定文案
+            raise NotificationTestError(
+                "notification_send_failed",
+                "通知测试发送失败，请稍后重试",
+                status_code=502,
+            )
 
-        self._log("success", rule_id, user_info, target)
+        self._log_safe(
+            "info",
+            f"source=notification_test rule_id={rule_id} request_id={request_id} "
+            f"channel_id={target['channel_id']} result=success",
+            operator,
+        )
+
         return {
             "success": True,
-            "message": "测试通知已发送",
             "request_id": request_id,
             "channel": {
                 "id": target["channel_id"],
                 "name": target["channel_name"],
-                "type": receipt.channel_type,
+                "type": target["channel_type"],
             },
-            "sent_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "duration_ms": int((time.monotonic() - started) * 1000),
+            "rule_enabled": bool(target.get("enabled")),
+            "channel_enabled": bool(target.get("channel_enabled")),
         }
-
-    def _check_rate_limit(self, rule_id: int, user_id: int) -> None:
-        if not self.limiter:
-            return
-        wait = self.limiter.acquire(f"{user_id}:{rule_id}")
-        if wait > 0:
-            raise NotificationTestError(
-                "测试发送过于频繁，请稍后重试",
-                code="notification_test_rate_limited",
-                status_code=429,
-                retry_after=max(1, math.ceil(wait)),
-            )
-
-    @staticmethod
-    def _message(target: dict[str, Any], request_id: str) -> str:
-        rule_name = str(target.get("name") or "").strip() or f"#{target['id']}"
-        return (
-            "【闲鱼超级管家】通知渠道测试\n"
-            f"闲鱼账号：{target['cookie_id']}\n"
-            f"通知规则：{rule_name}\n"
-            f"请求 ID：{request_id}"
-        )
-
-    @staticmethod
-    def _log(result: str, rule_id: int, user_info: Any, target: dict[str, Any]) -> None:
-        # 渠道配置含 webhook 密钥和 SMTP 密码，任何分支都不落日志。
-        logger.info(
-            f"source=notification_test rule_id={rule_id} "
-            f"user={((user_info or {}).get('username')) or ''} "
-            f"channel_type={target['channel_type']} result={result}"
-        )
