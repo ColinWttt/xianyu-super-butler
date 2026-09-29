@@ -73,7 +73,8 @@ docker compose logs xianyu-app | grep -E "Xvfb|Patchright"
 | CPU | 2 核够用，高于文档里点名的 J4125 / N5105 |
 | 磁盘 | 40 G 充裕：系统与 Docker 约 6 G、镜像解压实测 **2.84 G**（`docker system df`，压缩传输 0.67 G）留两份用于升级、SQLite 与日志约 2 G。日志回收写在代码里（`XianyuAutoAsync.py:163` 保留 7 天，`app/file_log_collector.py:66` 10 M × 3 天）；本配置另加 `logging.max-size` 上限，避免容器 stdout 无限增长 |
 
-测量方法与边界：`docker compose` 起 `ghcr.io/23star/xianyu-super-butler:latest`（带三段补齐挂载），
+测量方法与边界：`docker compose` 起 `ghcr.io/23star/xianyu-super-butler:latest`（2026-09-25 那轮还带着
+三段补齐文件的覆盖挂载，去掉挂载不影响这些数字），
 容器内读 `/sys/fs/cgroup/memory.current` 与 `memory.stat`，用与应用完全相同的 Chromium 参数
 （`utils/manual_captcha.py:188` 那组 `--no-sandbox --disable-setuid-sandbox --disable-dev-shm-usage
 --disable-blink-features=AutomationControlled`，`channel='chromium'`，有头 + Xvfb）打开一个页面并截图。
@@ -107,38 +108,36 @@ grep swap /etc/fstab   # 重启后是否还在
 容器内 `memory.max=100MiB`、`memory.swap.max=100MiB`），所以 **swap 只要存在，容器就会自动用上**，
 不需要在 compose 里另设 `memswap` 或 `mem_swappiness`。
 
-### 镜像与补齐文件
+### 镜像与代码同步
 
 `ghcr.io/23star/xianyu-super-butler` 由仓库作者那条 `main` 的 `.github/workflows/docker-publish.yml`
-构建。2026-09-25 实测 `latest`：镜像内缺 `app/delivery_template.py`、
-`app/services/notification_test.py`、`app/routers/logistics_quote.py`、`app/routers/logistics_agent.py`，
-而 `app/reply_server.py` 顶层无条件导入 → `uvicorn服务器启动失败: No module named 'app.delivery_template'`，
-健康检查恒失败、Nginx 因 `depends_on: service_healthy` 不启动。**这与服务器配置无关，任何机器光 pull 都起不来。**
-本地补齐不会让上游镜像变完整，所以云上必须靠下面的覆盖挂载把补齐的文件带进去。
+构建。2026-09-25 实测 `latest` 缺 `app/delivery_template.py`、`app/services/notification_test.py`、
+`app/routers/logistics_quote.py`、`app/routers/logistics_agent.py` 四个模块，而 `app/reply_server.py`
+顶层无条件导入 → `uvicorn服务器启动失败: No module named 'app.delivery_template'`，健康检查恒失败、
+Nginx 因 `depends_on: service_healthy` 不启动；当时只能把本地补齐的文件覆盖挂载进去。
 
-`docker-compose.cloud.yml` 默认把补齐的三个文件覆盖挂载进镜像，所以**服务器上必须有这份 checkout**：
+**上游已经在 `2c11ac2`（2026-09-29「补交缺失的 4 个模块，修复启动即崩溃」）修掉并发出了镜像**：
+`Publish Docker image` 在 `eeb9b6d` 上 success（2026-09-29 06:35 UTC），ghcr 现有 `v3.2.0`/`3.2.0`/`latest`。
+所以本仓库那份逆向出来的占位实现已被上游版本取代，`docker-compose.cloud.yml` 里的三段文件覆盖挂载
+也删了 —— 镜像自足，服务器上只需要这份 checkout 的 `docker-compose.cloud.yml`、`.env.cloud.example`、`nginx/`。
+
+验收镜像确实是补齐后的版本：
 
 ```bash
-# 核对镜像与本地 checkout 同版：只差 13 行，即物流路由 try/except 那处补丁
-docker exec xianyu-super-butler wc -l /app/app/reply_server.py
-wc -l app/reply_server.py
+docker compose -f docker-compose.cloud.yml pull
+docker compose -f docker-compose.cloud.yml run --rm --entrypoint sh xianyu-app \
+  -c 'ls /app/app/delivery_template.py /app/app/services/notification_test.py /app/app/routers/logistics_quote.py /app/app/routers/logistics_agent.py'
 ```
 
-补齐的提交只在你本地，服务器上 `git clone` 上游拿不到，所以把已提交的文件送过去。
-Windows 的 Git Bash 没有 `rsync`，用 `git archive` 走 ssh 管道最省事——它只送跟踪文件，
-`data/`、`logs/`、`browser_data/`、以及本机 `global_config.yml` 那处端口调试天然不会过去
-（缺挂载源文件时 Docker 会在容器内建同名空目录，报错从 `ModuleNotFound` 变成更难读的
-`IsADirectoryError`）：
+把这份 checkout 送到服务器，两条路：
 
 ```bash
-# 本机 Git Bash 里执行
+# 一、不推仓库：Windows 的 Git Bash 没有 rsync，用 git archive 走 ssh 管道，只送跟踪文件
+# （data/、logs/、browser_data/、以及本机 global_config.yml 那处端口调试天然不会过去）
 ssh root@<服务器IP> 'mkdir -p ~/xianyu-super-butler'
 git archive --format=tar HEAD | ssh root@<服务器IP> 'tar -x -C ~/xianyu-super-butler'
-```
 
-代码已推到 GitHub 时，服务器上直接 clone 自己的仓库更省事（省掉每次改动重传）：
-
-```bash
+# 二、推到 GitHub，服务器上 clone 自己的 fork，以后只 git pull（省掉每次重传）
 git clone https://github.com/<你的用户名>/<仓库名>.git ~/xianyu-super-butler
 # 以后更新：cd ~/xianyu-super-butler && git pull && docker compose -f docker-compose.cloud.yml up -d --force-recreate
 ```
@@ -151,17 +150,9 @@ cp .env.cloud.example .env && mkdir -p data logs backups nginx/ssl
 vi .env        # 改 ADMIN_PASSWORD、SERVER_HOST；MEMORY_LIMIT 按 free -h 的 total 定（3.5 GiB → 2816M）
 ```
 
-日后上游作者补齐了那 4 个文件，镜像就是自足的，可以删掉三段挂载。判断依据：
-
-```bash
-docker compose -f docker-compose.cloud.yml pull
-docker compose -f docker-compose.cloud.yml run --rm --entrypoint sh xianyu-app \
-  -c 'ls /app/app/delivery_template.py /app/app/services/notification_test.py'
-```
-
-想彻底摆脱挂载和手工传文件，就把这个仓库 fork 到**你自己的** GitHub 账号下再推上去：
-`.github/workflows/docker-publish.yml` 会在你的账号里构建出含补齐文件的
-`ghcr.io/<你的用户名>/xianyu-super-butler:latest`，服务器改成 `git clone` 你自己的 fork 即可。
+想用自己账号构建（国内拉 ghcr 慢，或要带上本仓库的改动）：把仓库 fork 到**你自己的** GitHub 账号下推上去，
+`.github/workflows/docker-publish.yml` 会构建出 `ghcr.io/<你的用户名>/xianyu-super-butler:latest`，
+服务器用 `APP_IMAGE` 指过去即可，不必改 compose。
 
 多账号会不会把内存翻倍？**不会翻倍浏览器那部分**。`utils/browser_limit.py:73` 按配置算并发闸：
 `cpu_count <= 2 或 内存 <= 4.5G` 时**同时只允许 1 个 Chromium**，第二个账号的验证会排队而不是挤进来。
@@ -254,7 +245,8 @@ docker push registry.cn-hangzhou.aliyuncs.com/<命名空间>/xianyu-butler:lates
 # 然后把 docker-compose.cloud.yml 里的 image: 换成该地址，或改用 APP_IMAGE 环境变量
 ```
 
-无论走哪条，镜像里仍缺那 4 个模块（见「镜像与补齐文件」），三段覆盖挂载照旧保留。
+无论走哪条，`v3.2.0` 起的镜像已自带那 4 个模块（见「镜像与代码同步」），不需要覆盖挂载。
+但转推时别只推 `latest`：`latest` 会被上游后续构建覆盖，服务器回滚时没锚点，把 `v3.2.0` 一起打上 tag 推过去。
 
 ### 环境变量里哪些是真生效的
 

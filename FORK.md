@@ -7,27 +7,29 @@
 
 ## 与上游的差异
 
-基线：`upstream/main` = `66081a3`（2026-09-25 取回）。上游之后的提交只动
-`docs/fork-network-stars.{json,svg}`（fork 星数统计），**没有代码差异**。
+基线：`upstream/main` = `eeb9b6d`（v3.2.0，2026-09-29），已在 `6947b1f` 并入。
 
 | 提交 | 日期 | 改动 | 原因 |
 | --- | --- | --- | --- |
-| `67a7962` | 2026-09-25 | 新增 `app/delivery_template.py`、`app/services/notification_test.py`；`app/reply_server.py` 里物流两个路由改为缺文件时降级 | 上游任何分支和 tag 都没发布这 4 个文件，`reply_server.py` 顶层无条件导入 → 后台进程 import 阶段即崩，监听与自动发货全不跑 |
+| ~~`67a7962`~~ | 2026-09-25 | 曾新增 `app/delivery_template.py`、`app/services/notification_test.py`，并给 `app/reply_server.py` 的物流路由加缺文件降级 | 当时上游任何分支和 tag 都没发布这 4 个文件，顶层无条件导入 → 后台 import 阶段即崩。**上游 `2c11ac2`（2026-09-29）已正式补交，本仓库这几处已改回上游实现** |
 | `6d91946` | 2026-09-25 | 新增 `docker-compose.cloud.yml`、`nginx/nginx.cloud.conf`、`.env.cloud.example` 与云服务器部署文档 | 面向 2~4 G 内存的云服务器：拉预构建镜像、应用端口只绑回环、Nginx 对外 |
 | `3efac43` | 2026-09-25 | 云配置显式设 `API_HOST`/`API_PORT`；`.gitattributes` 增加 `.env* text eol=lf` | `AUTO_REPLY.api.host/port` 就是 uvicorn 的监听地址（`Start.py:694`），本机调试值一旦随仓库挂载进容器，健康检查恒失败；CRLF 会让 `.env` 的值尾部带 `\r` |
-| `af179f9` | 2026-09-25 | 记录上游镜像缺模块的实测结论 | `ghcr.io/23star/...:latest` 由上游那条 main 构建，同样缺上述 4 个文件，光 pull 起不来 |
-| `2565a1b` | 2026-09-25 | 补齐文件的覆盖挂载改为云配置默认启用 | 上游镜像不会因本地补齐而变完整 |
 | `cc4beb0` | 2026-09-25 | 更正部署前提与传码方式 | 本仓库无上游写权限 |
+| `deafda2` | 2026-09-25 | 镜像地址可用 `APP_IMAGE` 覆盖，补国内 ghcr 备选路线 | 国内云主机直拉 ghcr 常拉不动 |
+
+其余提交是 `docs/` 下的部署实测记录（机型、内存、swap、断线补发等）。
 
 ## 跟上游同步
 
 ```bash
 git fetch upstream
-git rebase upstream/main
+git branch backup/pre-merge-<日期> main   # 先留退路
+git merge upstream/main
 ```
 
-上游目前待并入的提交只动星数统计文件，所以现在 rebase 是干净的；等他们再改
-`app/reply_server.py` 的导入区时才会冲突。
+本次同步（`6947b1f`）的冲突处理：`app/delivery_template.py`、`app/services/notification_test.py`
+取上游实现；`.gitignore` 取上游把测试忽略规则限定到 `tests/` 的写法，另保留 `!FORK.md` 与
+`!.env.cloud.example` 两处例外；`app/reply_server.py`、`README.md`、`docs/deployment.md` 自动合并。
 
 ## 部署时的 AGPL 义务（不是法律意见，但值得先知道）
 
