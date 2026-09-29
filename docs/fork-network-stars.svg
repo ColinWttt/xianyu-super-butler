@@ -19,7 +19,7 @@
       .card { fill: #161b22; }
     }
   </style>
-  <rect x="0.5" y="0.5" width="899" height="479" rx="8" class="bg"/>
+  <rect x="0.5" y="0.5" width="899" height="311" rx="8" class="bg"/>
   <text x="32" y="44" class="title">Fork Network Stars</text>
   <text x="32" y="104" class="total">3,072</text>
   <text x="32" y="130" class="label">combined stars across the main repository and public forks</text>
